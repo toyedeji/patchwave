@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""PatchWave runner CLI.
+
+Usage:
+  patchwave-run --tier 0 [--dry-run] [--ctid 109]
+  patchwave-run --release            # clear canary halt
+  patchwave-run --status             # show current state
+"""
+import argparse
+import configparser
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "/opt/patchwave")
+from lib import pipeline, targets as tmod
+from lib.state import RunState
+
+
+def parse_cfg(path):
+    cp = configparser.ConfigParser()
+    cp.read(path)
+    return {s: dict(cp.items(s)) for s in cp.sections()}
+
+
+def select_targets(targets, args):
+    cts = targets["cts"]
+    if args.ctid:
+        return [c for c in cts if c["ctid"] in args.ctid]
+    if args.tier is not None:
+        return [c for c in cts if c["tier"] == args.tier]
+    return []
+
+
+def enforce_policy(target_cts, args):
+    """Reject never-auto CTs unless explicitly listed by --ctid."""
+    out = []
+    rejects = []
+    for c in target_cts:
+        if c.get("never_auto") and not args.ctid:
+            rejects.append((c["ctid"], "never_auto — requires explicit --ctid"))
+            continue
+        if c.get("stay_stopped") and c.get("pre_state") == "stopped" and not args.force_power:
+            rejects.append((c["ctid"], "stay_stopped — refusing to power on (use --force-power to override; not recommended)"))
+            continue
+        out.append(c)
+    return out, rejects
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", default="/opt/patchwave/etc/runner.conf")
+    p.add_argument("--tier", type=int, choices=[0, 1, 2, 3])
+    p.add_argument("--ctid", type=int, action="append")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--release", action="store_true", help="clear canary-halt marker and continue")
+    p.add_argument("--status", action="store_true")
+    p.add_argument("--force-power", action="store_true", help="override stay_stopped policy (NOT recommended)")
+    p.add_argument("--run-id", help="resume a specific run id")
+    args = p.parse_args()
+
+    cfg = parse_cfg(args.config)
+    state_dir = Path(cfg["runner"]["state_dir"])
+    targets = tmod.load(cfg["runner"]["targets_file"])
+    halt_after_canary = cfg["runner"].get("halt_after_canary", "true").lower() == "true"
+
+    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
+    from lib.state import HaltedRunBlocked
+    try:
+        state = RunState(state_dir, run_id)
+    except HaltedRunBlocked as e:
+        print(f"BLOCKED: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if args.status:
+        print(f"run_id={state.data.get('run_id')}  halted={state.data.get('halted')}  "
+              f"released={state.data.get('canary_released')}")
+        for k, c in state.data.get("cts", {}).items():
+            print(f"  ct{k}: {c.get('status')}")
+        return
+
+    if args.release:
+        if not state.data.get("halted"):
+            print("not halted; nothing to release")
+            return
+        state.release_canary()
+        print(f"canary released for run {state.data.get('run_id')}; rerun without --release to continue")
+        return
+
+    if state.data.get("halted") and not state.data.get("canary_released"):
+        print(f"RUN {run_id} IS HALTED (canary review pending). Run with --release to clear.",
+              file=sys.stderr)
+        sys.exit(2)
+
+    selected = select_targets(targets, args)
+    if not selected:
+        print("no targets selected; use --tier or --ctid", file=sys.stderr)
+        sys.exit(2)
+    accepted, rejects = enforce_policy(selected, args)
+    for ctid, why in rejects:
+        print(f"REJECT ct{ctid}: {why}", file=sys.stderr)
+    if not accepted:
+        print("no accepted targets after policy enforcement", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"== PatchWave run {run_id}  dry={args.dry_run}  halt_after_canary={halt_after_canary} ==")
+    print(f"   targets: {[c['ctid'] for c in accepted]}")
+
+    for ct in accepted:
+        print(f"\n-- ct{ct['ctid']} {ct['name']} (tier={ct['tier']}, node={ct['node']}) --")
+        terminal = pipeline.run_pipeline(state, ct, cfg, args.dry_run, run_id)
+        print(f"   -> {terminal}")
+        if halt_after_canary:
+            state.mark_halt(f"halt_after_canary after ct{ct['ctid']}")
+            print(f"\n*** HALTED after canary ct{ct['ctid']}. Operator review required. ***")
+            print(f"*** To continue queue: patchwave-run --release --run-id {run_id} ***")
+            sys.exit(0)
+
+    print("\n== run complete ==")
+
+
+if __name__ == "__main__":
+    main()

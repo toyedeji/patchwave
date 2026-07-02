@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Daily PatchWave report to Cowork + fallback markdown."""
+import configparser
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/patchwave")
+from lib import reporter, targets as tmod
+
+
+def parse_cfg(path):
+    cp = configparser.ConfigParser()
+    cp.read(path)
+    return {s: dict(cp.items(s)) for s in cp.sections()}
+
+
+def main():
+    cfg = parse_cfg("/opt/patchwave/etc/runner.conf")
+    targets = tmod.load(cfg["runner"]["targets_file"])
+    text = reporter.build_report(cfg["runner"]["state_dir"], targets)
+
+    fallback = reporter.write_fallback(text, cfg["runner"]["log_dir"])
+    slack_url = cfg.get("report", {}).get("slack_webhook_url", "")
+    pushed, detail = reporter.post_to_slack(text, slack_url)
+    print(f"fallback={fallback}  slack_push={pushed} ({detail})")
+
+
+if __name__ == "__main__":
+    main()

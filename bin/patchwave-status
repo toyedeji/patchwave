@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+cur = Path("/opt/patchwave/state/current.json")
+if not cur.exists():
+    print("no current run state")
+    sys.exit(0)
+
+data = json.loads(cur.read_text())
+print(f"run_id     : {data.get('run_id')}")
+print(f"started    : {data.get('started')}")
+print(f"halted     : {data.get('halted')}")
+if data.get("halted"):
+    print(f"halt reason: {data.get('halt_reason')}")
+    print(f"halted at  : {data.get('halted_at')}")
+print(f"released   : {data.get('canary_released')}")
+print()
+print("Per-CT status:")
+for k, c in sorted(data.get("cts", {}).items(), key=lambda kv: int(kv[0])):
+    print(f"  ct{k}: {c.get('status'):<22} steps: " +
+          ",".join(f"{s}={info.get('status')}" for s, info in c.get("steps", {}).items()))

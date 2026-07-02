@@ -1,0 +1,10 @@
+[Unit]
+Description=Trigger PatchWave daily report at 07:15
+
+[Timer]
+OnCalendar=*-*-* 07:15:00
+Persistent=true
+Unit=patchwave-report.service
+
+[Install]
+WantedBy=timers.target

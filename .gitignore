@@ -1,0 +1,5 @@
+.env
+state.json
+runs/
+*.log
+__pycache__/

@@ -1,0 +1,70 @@
+version: phase1
+generated: 2026-06-17
+snapshot_prefix: patchwave
+patch_scope: security-only
+honor_holds: true
+os_packages_only: true
+
+# snap_strategy values (per-CT, decided by bind topology + pre_state):
+#   no-bind                — plain `pct snapshot` works; full rollback available.
+#   detach-snap-attach     — stopped CT with ro-only binds; detach mp*, snap,
+#                            patch with binds detached, reattach unconditionally
+#                            on every exit path. NOT YET IMPLEMENTED in pipeline;
+#                            runs against these CTs will refuse cleanly until built.
+#   fix-forward-enhanced   — running CT with ro-only binds; detach would need a
+#                            restart, so we patch in place without a snapshot.
+#                            Recovery is `pre_patch_capture` (versions + dpkg/apt
+#                            baseline) + retain old debs (no apt-get clean) so
+#                            operator can manually downgrade if a regression hits.
+#                            Reported as "patched WITHOUT snapshot protection".
+#   deferred               — rw data binds present; snapshot+rollback semantics
+#                            don't fit; runner refuses to patch until the rw-bind
+#                            data-survival contract is signed off per CT.
+
+policy:
+  approval_gated_tier3: [100, 103, 125, 140, 211, 777, 1906]
+  never_auto: [125, 211]
+  stay_stopped: [103]
+
+tier_order: [0, 1, 2, 3]
+
+# Probe schema: probes are described by (scheme, port, path).
+# Runner derives the IP from `pct config <ctid>` at execution time —
+# no hardcoded IPs here.
+cts:
+  - {ctid: 109,  node: node2, name: splunk-enterprise,       tier: 0, pre_state: stopped, snap_strategy: no-bind,             probes: {tcp: [8000, 8089]}, stateful: true}
+  - {ctid: 110,  node: node1, name: atlas-networkvisualizer, tier: 0, pre_state: stopped, snap_strategy: detach-snap-attach,  probes: {http: [{port: 80, path: "/"}]}}
+  - {ctid: 118,  node: node2, name: ai-agents,               tier: 0, pre_state: stopped, snap_strategy: no-bind,             probes: {}}
+  - {ctid: 120,  node: node1, name: homepage-dashboard,      tier: 0, pre_state: stopped, snap_strategy: detach-snap-attach,  probes: {http: [{port: 3000, path: "/"}]}}
+  - {ctid: 130,  node: node2, name: terraform-aws,           tier: 0, pre_state: stopped, snap_strategy: no-bind,             probes: {}}
+  - {ctid: 200,  node: node1, name: mcp-server,              tier: 0, pre_state: stopped, snap_strategy: detach-snap-attach,  probes: {}}
+  - {ctid: 300,  node: node1, name: elk-demo,                tier: 0, pre_state: stopped, snap_strategy: no-bind,             probes: {tcp: [9200, 5601]}, stateful: true}
+  - {ctid: 302,  node: node2, name: oci-demo,                tier: 0, pre_state: stopped, snap_strategy: no-bind,             probes: {}}
+
+  - {ctid: 101,  node: node2, name: uptime-kuma,             tier: 1, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 3001, path: "/"}]}}
+  # ct102 runs `glance` (Go dashboard) on :8080 — NOT `glances` (Python) on :61208.
+  # No body assertion: glance serves text/html without a stable substring.
+  - {ctid: 102,  node: node1, name: glance,                  tier: 1, pre_state: running, snap_strategy: no-bind,              probes: {http: [{port: 8080, path: "/"}]}}
+  - {ctid: 160,  node: node1, name: research-injection,      tier: 1, pre_state: running, snap_strategy: no-bind,              probes: {tcp: [22]}}
+
+  - {ctid: 112,  node: node2, name: duplicati-backup,        tier: 2, pre_state: running, snap_strategy: deferred,             probes: {http: [{port: 8200, path: "/", expect_status: 200, expect_body_substr: "Duplicati"}]}, stateful: true, pre_check: "no_backup_in_flight"}
+  - {ctid: 115,  node: node2, name: pihole,                  tier: 2, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 80, path: "/admin/", expect_body_substr: "Pi-hole"}], tcp: [53]}, stateful: true, downtime_notice: "DNS-critical"}
+  - {ctid: 116,  node: node1, name: n8n-docker,              tier: 2, pre_state: running, snap_strategy: no-bind,              probes: {http: [{port: 5678, path: "/healthz", expect_status: 200, expect_body_substr: "ok"}]}, stateful: true, pre_check: "no_active_executions"}
+  - {ctid: 131,  node: node1, name: pg-redis,                tier: 2, pre_state: running, snap_strategy: no-bind,              probes: {tcp: [5432, 6379]}, stateful: true, post_action: "verify pg accepts SELECT 1 and redis PING", refine: "TIGHTEN before gated run — TCP-open != DB-healthy; need pct exec psql/redis-cli probe"}
+  - {ctid: 150,  node: node1, name: codeproject-ai,          tier: 2, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 32168, path: "/v1/status", expect_status: 200}]}, stateful: true, security_anomaly: "third-party repo does not tag security; security-only is no-op; per-container full-vs-manual decision required"}
+  - {ctid: 301,  node: node2, name: ntopng-monitor,          tier: 2, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 3000, path: "/"}]}, stateful: true, post_action: "verify capture interfaces rebound", refine: "TIGHTEN before gated run — confirm expected ntopng login page/health endpoint"}
+
+  # ct100 HA: 401 with auth-required body is the *healthy* signal; 5xx or no
+  # auth-realm response means the supervisor is degraded.
+  - {ctid: 100,  node: node1, name: homeassistant,           tier: 3, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 8123, path: "/api/", expect_status: 401, expect_body_substr: "Unauthorized"}]}, stateful: true, approval_gated: true}
+  - {ctid: 103,  node: node1, name: prometheus-stack,        tier: 3, pre_state: stopped, snap_strategy: detach-snap-attach,   probes: {}, stateful: true, approval_gated: true, stay_stopped: true, note: "TSDB; operator-mandated stay-stopped"}
+  # ct140 ollama: /api/tags returns 200 with "models" key in JSON.
+  - {ctid: 140,  node: node1, name: ollama-demo,             tier: 3, pre_state: running, snap_strategy: deferred,             probes: {http: [{port: 11434, path: "/api/tags", expect_status: 200, expect_body_substr: "models"}]}, stateful: true, approval_gated: true, post_action: "wait for model warm"}
+  - {ctid: 1906, node: node1, name: d9eventhub,              tier: 3, pre_state: running, snap_strategy: no-bind,              probes: {tcp: [80]}, stateful: true, approval_gated: true, refine: "TIGHTEN before gated run — TCP-only probe doesn't assert event-hub health"}
+  - {ctid: 777,  node: node1, name: obsidian,                tier: 3, pre_state: running, snap_strategy: deferred,             probes: {http: [{port: 8080, path: "/"}]}, stateful: true, approval_gated: true, slot: "dead-last-of-running", refine: "TIGHTEN before gated run — confirm expected status/body for obsidian-livesync"}
+
+  # ct211 has BOTH ro mp0 (claude-context) AND rw mp1 (obsidian-vault); the rw
+  # bind pins it to deferred until per-CT data-survival contract is signed off.
+  - {ctid: 211,  node: node2, name: hermes-agents-1,         tier: 3, pre_state: running, snap_strategy: deferred,             probes: {docker_running: true}, stateful: true, approval_gated: true, never_auto: true, slot: "own-slot; supervisor host; never auto", refine: "TIGHTEN before gated run — add per-agent health endpoint check (vulcan host)"}
+  # ct125 patchmon: 200 + 'patchmon' or 'PatchMon' substring confirms SPA is served (not generic nginx).
+  - {ctid: 125,  node: node2, name: patchmon,                tier: 3, pre_state: running, snap_strategy: fix-forward-enhanced, probes: {http: [{port: 3000, path: "/", expect_status: 200, expect_body_substr: "patchmon"}]}, stateful: true, approval_gated: true, never_auto: true, slot: "own-slot-after-211; source-of-truth"}
