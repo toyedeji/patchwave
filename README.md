@@ -1,6 +1,6 @@
 # PatchWave
 
-Autonomous security-patch orchestration for Proxmox LXC homelab clusters.
+Autonomous security-patch orchestration for Proxmox LXC testlab clusters.
 
 PatchWave runs nightly between 00:00–07:00, patches each container serially,
 snapshots before every change, rolls back automatically on regression, and
